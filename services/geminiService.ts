@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 import { GoogleGenAI } from "@google/genai";
-import type { GenerateContentResponse } from "@google/genai";
+import type { GenerateContentResponse, Part } from "@google/genai";
+import type { GeneratedImage } from "../App";
 
 const API_KEY = process.env.API_KEY;
 
@@ -13,133 +14,157 @@ if (!API_KEY) {
 
 const ai = new GoogleGenAI({ apiKey: API_KEY });
 
+// --- Helper Functions ---
 
-// --- Prompts and Helper Functions ---
-
-const PROMPTS_MAP: Record<string, string> = {
-    'Luxury': "Create a high-end, luxurious advertisement featuring the subject from the image. Think of a commercial for a designer perfume, expensive watch, or luxury car. The mood should be sophisticated, elegant, and aspirational. The lighting should be professional and dramatic.",
-    'Vintage': "Generate a vintage-style print ad, reminiscent of the 1950s or 1960s, using the subject from the image. The ad should have a retro color palette, typography, and a slightly aged, nostalgic feel. Include classic ad copy elements like a catchy slogan.",
-    'Minimalist': "Transform the image into a clean, modern, minimalist advertisement. Think of a tech product ad (like Apple or Google). The background should be simple, with lots of negative space. The focus must be entirely on the subject, presented in a sleek and uncluttered way.",
-    'Action': "Reimagine the subject from the image as the star of a high-energy action movie poster or a sports drink advertisement. The scene should be dynamic, with motion blur, dramatic lighting, and an intense, powerful mood. Make it look exciting and cinematic.",
-    'Skincare': "Create a bright, clean, and fresh skincare or beauty product advertisement with the subject from the image. The lighting should be soft and flattering, emphasizing clear skin and a natural glow. The overall feeling should be serene, healthy, and pure.",
-    'Streetwear': "Generate a cool, edgy streetwear fashion ad featuring the subject from the image. The setting should be urban, like a city street or skatepark. The style should be modern and trendy, with a confident, rebellious vibe. Think of brands like Supreme or Off-White."
-};
-
-
-/**
- * Creates a fallback prompt to use when the primary one is blocked.
- * @param style The ad style string (e.g., "Luxury").
- * @returns The fallback prompt string.
- */
-function getFallbackPrompt(style: string): string {
-    return `Create a high-quality advertisement featuring the subject of this image in a '${style}' style. The ad should look professional and visually compelling, capturing the essence of that style. Ensure the final output is a clear, photorealistic image.`;
+function dataUrlToPart(dataUrl: string): Part | null {
+    const match = dataUrl.match(/^data:(image\/\w+);base64,(.*)$/);
+    if (!match) return null;
+    const [, mimeType, base64Data] = match;
+    return { inlineData: { mimeType, data: base64Data } };
 }
 
-/**
- * Processes the Gemini API response, extracting the image or throwing an error if none is found.
- * @param response The response from the generateContent call.
- * @returns A data URL string for the generated image.
- */
 function processGeminiResponse(response: GenerateContentResponse): string {
     const imagePartFromResponse = response.candidates?.[0]?.content?.parts?.find(part => part.inlineData);
-
     if (imagePartFromResponse?.inlineData) {
         const { mimeType, data } = imagePartFromResponse.inlineData;
         return `data:${mimeType};base64,${data}`;
     }
-
     const textResponse = response.text;
     console.error("API did not return an image. Response:", textResponse);
     throw new Error(`The AI model responded with text instead of an image: "${textResponse || 'No text response received.'}"`);
 }
 
+interface AdFormData {
+    aspectRatio: string;
+    productType: string;
+    productTitle: string;
+    flavor: string;
+    companyName: string;
+    tagline: string;
+    brandColors: string;
+}
+
 /**
- * A wrapper for the Gemini API call that includes a retry mechanism for internal server errors.
- * @param imagePart The image part of the request payload.
- * @param textPart The text part of the request payload.
- * @returns The GenerateContentResponse from the API.
+ * Parses the text response from the research model to extract individual prompts.
+ * @param text The raw text response from the model.
+ * @returns An array of 10 prompt strings.
  */
-async function callGeminiWithRetry(imagePart: object, textPart: object): Promise<GenerateContentResponse> {
-    const maxRetries = 3;
-    const initialDelay = 1000;
+function parsePromptsFromText(text: string): string[] {
+    const prompts = text.split(/PROMPT \d+:/)
+        .map(p => p.trim())
+        .filter(p => p.length > 0);
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            return await ai.models.generateContent({
-                model: 'gemini-2.5-flash-image-preview',
-                contents: { parts: [imagePart, textPart] },
-            });
-        } catch (error) {
-            console.error(`Error calling Gemini API (Attempt ${attempt}/${maxRetries}):`, error);
-            const errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-            const isInternalError = errorMessage.includes('"code":500') || errorMessage.includes('INTERNAL');
-
-            if (isInternalError && attempt < maxRetries) {
-                const delay = initialDelay * Math.pow(2, attempt - 1);
-                console.log(`Internal error detected. Retrying in ${delay}ms...`);
-                await new Promise(resolve => setTimeout(resolve, delay));
-                continue;
-            }
-            throw error; // Re-throw if not a retriable error or if max retries are reached.
-        }
+    if (prompts.length < 10) {
+        console.error("Failed to parse 10 prompts, found:", prompts.length, "Raw response:", text);
+        throw new Error("The AI failed to generate enough creative concepts. Please try again.");
     }
-    // This should be unreachable due to the loop and throw logic above.
-    throw new Error("Gemini API call failed after all retries.");
+    return prompts.slice(0, 10);
 }
 
 
-/**
- * Generates an ad-styled image from a source image and a style descriptor.
- * It includes a fallback mechanism for prompts that might be blocked.
- * @param imageDataUrl A data URL string of the source image (e.g., 'data:image/png;base64,...').
- * @param style The ad style to generate (e.g., 'Luxury', 'Vintage').
- * @returns A promise that resolves to a base64-encoded image data URL of the generated image.
- */
-export async function generateAdImage(imageDataUrl: string, style: string): Promise<string> {
-  const match = imageDataUrl.match(/^data:(image\/\w+);base64,(.*)$/);
-  if (!match) {
-    throw new Error("Invalid image data URL format. Expected 'data:image/...;base64,...'");
-  }
-  const [, mimeType, base64Data] = match;
+async function generateSingleAd(
+    productImagePart: Part,
+    logoImagePart: Part | null,
+    creativePrompt: string,
+    options: AdFormData
+): Promise<string> {
+    const logoInstruction = logoImagePart 
+        ? "Incorporate the company logo from the second image subtly and professionally."
+        : "No logo was provided, so do not add one.";
+        
+    const textPrompt = `
+TASK: Create a professional advertisement using the provided product image.
+CONCEPT: ${creativePrompt}
+INSTRUCTIONS:
+1. Place the product from the first image into the scene described by the concept.
+2. ${logoInstruction}
+3. The final ad's aspect ratio must be: ${options.aspectRatio}.
+4. Adhere to the brand colors: ${options.brandColors}.
+5. If a tagline is provided, incorporate it stylishly: "${options.tagline}".
+`;
 
-    const imagePart = {
-        inlineData: { mimeType, data: base64Data },
-    };
-    
-    const prompt = PROMPTS_MAP[style];
-    if (!prompt) {
-        throw new Error(`Invalid ad style provided: ${style}`);
+    const parts: Part[] = [{ text: textPrompt }, productImagePart];
+    if (logoImagePart) {
+        parts.push(logoImagePart);
     }
 
-    // --- First attempt with the original prompt ---
     try {
-        console.log(`Attempting generation for "${style}" with original prompt...`);
-        const textPart = { text: prompt };
-        const response = await callGeminiWithRetry(imagePart, textPart);
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash-image-preview',
+            contents: { parts },
+        });
         return processGeminiResponse(response);
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-        const isNoImageError = errorMessage.includes("The AI model responded with text instead of an image");
-
-        if (isNoImageError) {
-            console.warn(`Original prompt for "${style}" was likely blocked. Trying a fallback prompt.`);
-            
-            // --- Second attempt with the fallback prompt ---
-            try {
-                const fallbackPrompt = getFallbackPrompt(style);
-                console.log(`Attempting generation with fallback prompt for ${style}...`);
-                const fallbackTextPart = { text: fallbackPrompt };
-                const fallbackResponse = await callGeminiWithRetry(imagePart, fallbackTextPart);
-                return processGeminiResponse(fallbackResponse);
-            } catch (fallbackError) {
-                console.error("Fallback prompt also failed.", fallbackError);
-                const finalErrorMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-                throw new Error(`The AI model failed with both original and fallback prompts. Last error: ${finalErrorMessage}`);
-            }
-        } else {
-            // This is for other errors, like a final internal server error after retries.
-            console.error("An unrecoverable error occurred during image generation.", error);
-            throw new Error(`The AI model failed to generate an image. Details: ${errorMessage}`);
-        }
+        throw new Error(`AI model failed: ${errorMessage}`);
     }
+}
+
+/**
+ * Researches ad concepts and generates a 10-image campaign.
+ * @param onProgressUpdate Callback to update UI with each generated image.
+ */
+export async function researchAndGenerateAds(
+    productImageDataUrl: string,
+    logoImageDataUrl: string | null,
+    options: AdFormData,
+    onProgressUpdate: (index: number, result: GeneratedImage) => void
+): Promise<void> {
+
+    // --- 1. RESEARCH PHASE ---
+    const researchPrompt = `
+You are a world-class creative director. Your task is to research popular advertising styles for a product and generate 10 unique, creative concepts for an ad campaign.
+
+PRODUCT DETAILS:
+- Product Type: ${options.productType}
+- Product Title: ${options.productTitle}
+- Flavor: ${options.flavor}
+- Company Name: ${options.companyName}
+- Target Vibe/Colors: ${options.brandColors}
+
+Based on your research of current market trends for this type of product, generate exactly 10 distinct visual prompts for an image generation AI.
+
+Each prompt must be detailed and describe a complete scene.
+
+IMPORTANT: Format your response ONLY with the prompts. Each prompt must start with "PROMPT [number]:". Do not include any other text, greetings, or explanations.
+
+EXAMPLE:
+PROMPT 1: A dynamic action shot of the [product] splashing into a crystal clear wave on a sunny beach, with fresh [flavor] fruits scattered on the sand.
+PROMPT 2: A minimalist studio shot of the [product] on a pedestal made of ice, with soft, cool-toned lighting highlighting condensation on the can.
+...and so on for 10 prompts.
+`;
+    
+    let creativePrompts: string[];
+    try {
+        const researchResponse = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: researchPrompt,
+            config: {
+                tools: [{ googleSearch: {} }],
+            },
+        });
+        creativePrompts = parsePromptsFromText(researchResponse.text);
+    } catch (error) {
+        console.error("Error during research phase:", error);
+        throw new Error("The AI failed during the research phase. Please check your inputs and try again.");
+    }
+
+    // --- 2. GENERATION PHASE ---
+    const productImagePart = dataUrlToPart(productImageDataUrl);
+    if (!productImagePart) {
+        throw new Error("Invalid product image data URL.");
+    }
+    const logoImagePart = logoImageDataUrl ? dataUrlToPart(logoImageDataUrl) : null;
+
+    // Run all 10 generations in parallel
+    await Promise.all(creativePrompts.map(async (prompt, index) => {
+        try {
+            const resultUrl = await generateSingleAd(productImagePart, logoImagePart, prompt, options);
+            onProgressUpdate(index, { status: 'done', url: resultUrl });
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "An unknown error occurred.";
+            console.error(`Failed to generate ad for prompt ${index + 1}:`, error);
+            onProgressUpdate(index, { status: 'error', error: errorMessage });
+        }
+    }));
 }

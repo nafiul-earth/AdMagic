@@ -2,349 +2,247 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
 */
-import React, { useState, ChangeEvent, useRef, useEffect } from 'react';
-import { motion } from 'framer-motion';
-import { generateAdImage } from './services/geminiService';
-import PolaroidCard from './components/PolaroidCard';
-import { createAlbumPage } from './lib/albumUtils';
+import React, { useState, ChangeEvent } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { researchAndGenerateAds } from './services/geminiService';
+import AdCard from './components/AdCard';
 import Footer from './components/Footer';
 
-const AD_STYLES = ['Luxury', 'Vintage', 'Minimalist', 'Action', 'Skincare', 'Streetwear'];
+export type ImageStatus = 'idle' | 'pending' | 'done' | 'error';
 
-// Pre-defined positions for a scattered look on desktop
-const POSITIONS = [
-    { top: '5%', left: '10%', rotate: -8 },
-    { top: '15%', left: '60%', rotate: 5 },
-    { top: '45%', left: '5%', rotate: 3 },
-    { top: '2%', left: '35%', rotate: 10 },
-    { top: '40%', left: '70%', rotate: -12 },
-    { top: '50%', left: '38%', rotate: -3 },
-];
-
-const GHOST_POLAROIDS_CONFIG = [
-  { initial: { x: "-150%", y: "-100%", rotate: -30 }, transition: { delay: 0.2 } },
-  { initial: { x: "150%", y: "-80%", rotate: 25 }, transition: { delay: 0.4 } },
-  { initial: { x: "-120%", y: "120%", rotate: 45 }, transition: { delay: 0.6 } },
-  { initial: { x: "180%", y: "90%", rotate: -20 }, transition: { delay: 0.8 } },
-  { initial: { x: "0%", y: "-200%", rotate: 0 }, transition: { delay: 0.5 } },
-  { initial: { x: "100%", y: "150%", rotate: 10 }, transition: { delay: 0.3 } },
-];
-
-
-type ImageStatus = 'pending' | 'done' | 'error';
-interface GeneratedImage {
+export interface GeneratedImage {
     status: ImageStatus;
     url?: string;
     error?: string;
 }
 
-const primaryButtonClasses = "font-permanent-marker text-xl text-center text-black bg-yellow-400 py-3 px-8 rounded-sm transform transition-transform duration-200 hover:scale-105 hover:-rotate-2 hover:bg-yellow-300 shadow-[2px_2px_0px_2px_rgba(0,0,0,0.2)]";
-const secondaryButtonClasses = "font-permanent-marker text-xl text-center text-white bg-white/10 backdrop-blur-sm border-2 border-white/80 py-3 px-8 rounded-sm transform transition-transform duration-200 hover:scale-105 hover:rotate-2 hover:bg-white hover:text-black";
+const primaryButtonClasses = "font-permanent-marker text-xl text-center text-black bg-yellow-400 py-3 px-8 rounded-sm transform transition-transform duration-200 hover:scale-105 hover:-rotate-2 hover:bg-yellow-300 shadow-[2px_2px_0px_2px_rgba(0,0,0,0.2)] disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none disabled:bg-yellow-600";
+const secondaryButtonClasses = "font-permanent-marker text-md text-center text-white bg-white/10 backdrop-blur-sm border border-white/50 py-2 px-6 rounded-sm transform transition-transform duration-200 hover:scale-105 hover:rotate-2 hover:bg-white hover:text-black whitespace-nowrap";
 
-const useMediaQuery = (query: string) => {
-    const [matches, setMatches] = useState(false);
-    useEffect(() => {
-        const media = window.matchMedia(query);
-        if (media.matches !== matches) {
-            setMatches(media.matches);
-        }
-        const listener = () => setMatches(media.matches);
-        window.addEventListener('resize', listener);
-        return () => window.removeEventListener('resize', listener);
-    }, [matches, query]);
-    return matches;
+const initialFormData = {
+    aspectRatio: "1:1 Instagram",
+    productType: "",
+    productTitle: "",
+    flavor: "",
+    companyName: "",
+    tagline: "",
+    brandColors: "",
 };
 
-function App() {
-    const [uploadedImage, setUploadedImage] = useState<string | null>(null);
-    const [generatedImages, setGeneratedImages] = useState<Record<string, GeneratedImage>>({});
-    const [isLoading, setIsLoading] = useState<boolean>(false);
-    const [isDownloading, setIsDownloading] = useState<boolean>(false);
-    const [appState, setAppState] = useState<'idle' | 'image-uploaded' | 'generating' | 'results-shown'>('idle');
-    const dragAreaRef = useRef<HTMLDivElement>(null);
-    const isMobile = useMediaQuery('(max-width: 768px)');
-
-
-    const handleImageUpload = (e: ChangeEvent<HTMLInputElement>) => {
+const ImageUpload = ({ label, onImageUpload, uploadedImage }: { label: string, onImageUpload: (dataUrl: string) => void, uploadedImage: string | null }) => {
+    const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
         if (e.target.files && e.target.files[0]) {
             const file = e.target.files[0];
             const reader = new FileReader();
             reader.onloadend = () => {
-                setUploadedImage(reader.result as string);
-                setAppState('image-uploaded');
-                setGeneratedImages({}); // Clear previous results
+                onImageUpload(reader.result as string);
             };
             reader.readAsDataURL(file);
         }
     };
 
-    const handleGenerateClick = async () => {
-        if (!uploadedImage) return;
+    return (
+        <div>
+            <label className="block font-permanent-marker text-neutral-400 mb-2">{label}</label>
+            <label htmlFor={label.toLowerCase().replace(' ', '-')} className="cursor-pointer block bg-white/5 border-2 border-dashed border-white/20 rounded-md aspect-video flex items-center justify-center text-neutral-500 hover:border-yellow-400 hover:text-yellow-400 transition-colors">
+                {uploadedImage ? (
+                    <img src={uploadedImage} alt="Upload preview" className="max-h-full max-w-full object-contain" />
+                ) : (
+                    <span>+ Upload</span>
+                )}
+            </label>
+            <input id={label.toLowerCase().replace(' ', '-')} type="file" className="hidden" accept="image/png, image/jpeg, image/webp" onChange={handleFileChange} />
+        </div>
+    );
+};
 
-        setIsLoading(true);
-        setAppState('generating');
-        
-        const initialImages: Record<string, GeneratedImage> = {};
-        AD_STYLES.forEach(style => {
-            initialImages[style] = { status: 'pending' };
-        });
-        setGeneratedImages(initialImages);
+const FormView = ({ onGenerate }: { onGenerate: (productImage: string, logoImage: string | null, formData: typeof initialFormData) => void }) => {
+    const [formData, setFormData] = useState(initialFormData);
+    const [productImage, setProductImage] = useState<string | null>(null);
+    const [logoImage, setLogoImage] = useState<string | null>(null);
+    const [isGenerating, setIsGenerating] = useState(false);
 
-        const concurrencyLimit = 2; // Process two styles at a time
-        const stylesQueue = [...AD_STYLES];
-
-        const processStyle = async (style: string) => {
-            try {
-                const resultUrl = await generateAdImage(uploadedImage, style);
-                setGeneratedImages(prev => ({
-                    ...prev,
-                    [style]: { status: 'done', url: resultUrl },
-                }));
-            } catch (err) {
-                const errorMessage = err instanceof Error ? err.message : "An unknown error occurred.";
-                setGeneratedImages(prev => ({
-                    ...prev,
-                    [style]: { status: 'error', error: errorMessage },
-                }));
-                console.error(`Failed to generate image for ${style}:`, err);
-            }
-        };
-
-        const workers = Array(concurrencyLimit).fill(null).map(async () => {
-            while (stylesQueue.length > 0) {
-                const style = stylesQueue.shift();
-                if (style) {
-                    await processStyle(style);
-                }
-            }
-        });
-
-        await Promise.all(workers);
-
-        setIsLoading(false);
-        setAppState('results-shown');
+    const handleInputChange = (e: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+        const { name, value } = e.target;
+        setFormData(prev => ({ ...prev, [name]: value }));
     };
 
-    const handleRegenerateStyle = async (style: string) => {
-        if (!uploadedImage) return;
-
-        // Prevent re-triggering if a generation is already in progress
-        if (generatedImages[style]?.status === 'pending') {
+    const handleGenerateClick = () => {
+        if (!productImage || !formData.productType || !formData.productTitle) {
+            alert("Please provide a product image, type, and title.");
             return;
         }
-        
-        console.log(`Regenerating image for ${style}...`);
+        setIsGenerating(true);
+        onGenerate(productImage, logoImage, formData);
+    };
 
-        // Set the specific style to 'pending' to show the loading spinner
-        setGeneratedImages(prev => ({
-            ...prev,
-            [style]: { status: 'pending' },
-        }));
+    const isGenerationDisabled = !productImage || !formData.productType || !formData.productTitle || isGenerating;
 
-        // Call the generation service for the specific style
-        try {
-            const resultUrl = await generateAdImage(uploadedImage, style);
-            setGeneratedImages(prev => ({
-                ...prev,
-                [style]: { status: 'done', url: resultUrl },
-            }));
-        } catch (err) {
-            const errorMessage = err instanceof Error ? err.message : "An unknown error occurred.";
-            setGeneratedImages(prev => ({
-                ...prev,
-                [style]: { status: 'error', error: errorMessage },
-            }));
-            console.error(`Failed to regenerate image for ${style}:`, err);
-        }
+    return (
+        <div className="w-full max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-12 px-4">
+            <motion.div
+                initial={{ opacity: 0, x: -50 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ duration: 0.6, ease: 'easeInOut' }}
+                className="space-y-6"
+            >
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <ImageUpload label="Product Image" onImageUpload={setProductImage} uploadedImage={productImage} />
+                    <ImageUpload label="Company Logo" onImageUpload={setLogoImage} uploadedImage={logoImage} />
+                </div>
+                <div>
+                    <label htmlFor="aspectRatio" className="block font-permanent-marker text-neutral-400 mb-2">Aspect Ratio</label>
+                    <select name="aspectRatio" id="aspectRatio" value={formData.aspectRatio} onChange={handleInputChange} className="w-full bg-white/5 border border-white/20 rounded-md p-2 focus:outline-none focus:ring-2 focus:ring-yellow-400">
+                        <option>1:1 Instagram</option>
+                        <option>16:9 YouTube</option>
+                        <option>2:3 Poster</option>
+                        <option>9:16 Story</option>
+                        <option>4:5 Portrait</option>
+                    </select>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                        <label htmlFor="productType" className="block font-permanent-marker text-neutral-400 mb-2">Product Type*</label>
+                        <input type="text" name="productType" id="productType" value={formData.productType} onChange={handleInputChange} placeholder="e.g., cold drink can" className="w-full bg-white/5 border border-white/20 rounded-md p-2 focus:outline-none focus:ring-2 focus:ring-yellow-400" />
+                    </div>
+                    <div>
+                        <label htmlFor="productTitle" className="block font-permanent-marker text-neutral-400 mb-2">Product Title*</label>
+                        <input type="text" name="productTitle" id="productTitle" value={formData.productTitle} onChange={handleInputChange} placeholder="e.g., SparkFizz" className="w-full bg-white/5 border border-white/20 rounded-md p-2 focus:outline-none focus:ring-2 focus:ring-yellow-400" />
+                    </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                        <label htmlFor="flavor" className="block font-permanent-marker text-neutral-400 mb-2">Flavor</label>
+                        <input type="text" name="flavor" id="flavor" value={formData.flavor} onChange={handleInputChange} placeholder="e.g., Lemon Lime" className="w-full bg-white/5 border border-white/20 rounded-md p-2 focus:outline-none focus:ring-2 focus:ring-yellow-400" />
+                    </div>
+                    <div>
+                        <label htmlFor="companyName" className="block font-permanent-marker text-neutral-400 mb-2">Company Name</label>
+                        <input type="text" name="companyName" id="companyName" value={formData.companyName} onChange={handleInputChange} placeholder="e.g., FizzCo Beverages" className="w-full bg-white/5 border border-white/20 rounded-md p-2 focus:outline-none focus:ring-2 focus:ring-yellow-400" />
+                    </div>
+                </div>
+                <div>
+                    <label htmlFor="tagline" className="block font-permanent-marker text-neutral-400 mb-2">Tagline (Optional)</label>
+                    <input type="text" name="tagline" id="tagline" value={formData.tagline} onChange={handleInputChange} placeholder="e.g., Refresh Your World" className="w-full bg-white/5 border border-white/20 rounded-md p-2 focus:outline-none focus:ring-2 focus:ring-yellow-400" />
+                </div>
+                <div>
+                    <label htmlFor="brandColors" className="block font-permanent-marker text-neutral-400 mb-2">Brand Colors</label>
+                    <input type="text" name="brandColors" id="brandColors" value={formData.brandColors} onChange={handleInputChange} placeholder="e.g., #2AB673, silver, white" className="w-full bg-white/5 border border-white/20 rounded-md p-2 focus:outline-none focus:ring-2 focus:ring-yellow-400" />
+                </div>
+                <div className="pt-4">
+                    <button onClick={handleGenerateClick} disabled={isGenerationDisabled} className={primaryButtonClasses}>
+                        {isGenerating ? 'Generating...' : 'Generate Campaign'}
+                    </button>
+                </div>
+            </motion.div>
+            <motion.div
+                initial={{ opacity: 0, x: 50 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ duration: 0.6, ease: 'easeInOut' }}
+                className="flex flex-col items-center justify-center text-center text-neutral-500 p-8 bg-white/5 border-2 border-dashed border-white/20 rounded-md"
+            >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                </svg>
+                <h3 className="font-permanent-marker text-2xl text-neutral-400">Your Campaign Awaits</h3>
+                <p className="mt-2 max-w-sm">Fill out the details, upload your product image, and watch as AI generates 10 unique ad concepts for your next big campaign.</p>
+            </motion.div>
+        </div>
+    );
+};
+
+const ResultsView = ({ ads, onStartOver }: { ads: GeneratedImage[], onStartOver: () => void }) => (
+    <div className="w-full max-w-7xl mx-auto px-4">
+        <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, ease: 'easeOut' }}
+            className="text-center"
+        >
+            <div className="flex justify-center items-center gap-6 mb-12">
+                <button onClick={onStartOver} className={secondaryButtonClasses}>
+                    &larr; Start Over
+                </button>
+                <h2 className="text-3xl md:text-5xl font-permanent-marker text-neutral-100">Your Ad Campaign Concepts</h2>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 sm:gap-6">
+                {ads.map((ad, index) => (
+                    <AdCard
+                        key={index}
+                        status={ad.status}
+                        imageUrl={ad.url}
+                        error={ad.error}
+                        index={index}
+                    />
+                ))}
+            </div>
+        </motion.div>
+    </div>
+);
+
+
+function App() {
+    const [view, setView] = useState<'form' | 'results'>('form');
+    const [generatedAds, setGeneratedAds] = useState<GeneratedImage[]>([]);
+
+    const handleGenerate = (productImage: string, logoImage: string | null, formData: typeof initialFormData) => {
+        // Initialize 10 ads in pending state
+        setGeneratedAds(Array(10).fill({ status: 'pending' }));
+        setView('results');
+
+        // Callback function for real-time updates
+        const onProgressUpdate = (index: number, result: GeneratedImage) => {
+            setGeneratedAds(prevAds => {
+                const newAds = [...prevAds];
+                newAds[index] = result;
+                return newAds;
+            });
+        };
+
+        researchAndGenerateAds(productImage, logoImage, formData, onProgressUpdate)
+            .catch(err => {
+                console.error("Failed to generate ad campaign:", err);
+                // If the whole process fails, set all to error
+                const errorMessage = err instanceof Error ? err.message : "An unknown error occurred during campaign generation.";
+                setGeneratedAds(Array(10).fill({ status: 'error', error: errorMessage }));
+            });
     };
     
-    const handleReset = () => {
-        setUploadedImage(null);
-        setGeneratedImages({});
-        setAppState('idle');
-    };
-
-    const handleDownloadIndividualImage = (style: string) => {
-        const image = generatedImages[style];
-        if (image?.status === 'done' && image.url) {
-            const link = document.createElement('a');
-            link.href = image.url;
-            link.download = `admagic-${style.toLowerCase()}.jpg`;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        }
-    };
-
-    const handleDownloadAlbum = async () => {
-        setIsDownloading(true);
-        try {
-            const imageData = Object.entries(generatedImages)
-                .filter(([, image]) => image.status === 'done' && image.url)
-                .reduce((acc, [style, image]) => {
-                    acc[style] = image!.url!;
-                    return acc;
-                }, {} as Record<string, string>);
-
-            if (Object.keys(imageData).length < AD_STYLES.length) {
-                alert("Please wait for all images to finish generating before downloading the album.");
-                return;
-            }
-
-            const albumDataUrl = await createAlbumPage(imageData);
-
-            const link = document.createElement('a');
-            link.href = albumDataUrl;
-            link.download = 'admagic-campaign.jpg';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-
-        } catch (error) {
-            console.error("Failed to create or download album:", error);
-            alert("Sorry, there was an error creating your album. Please try again.");
-        } finally {
-            setIsDownloading(false);
-        }
+    const handleStartOver = () => {
+        setGeneratedAds([]);
+        setView('form');
     };
 
     return (
-        <main className="bg-black text-neutral-200 min-h-screen w-full flex flex-col items-center justify-center p-4 pb-24 overflow-hidden relative">
+        <main className="bg-black text-neutral-200 min-h-screen w-full flex flex-col items-center justify-center p-4 pb-24 relative">
             <div className="absolute top-0 left-0 w-full h-full bg-grid-white/[0.05]"></div>
-            
-            <div className="z-10 flex flex-col items-center justify-center w-full h-full flex-1 min-h-0">
-                <div className="text-center mb-10">
-                    <h1 className="text-6xl md:text-8xl font-caveat font-bold text-neutral-100">AdMagic</h1>
-                    <p className="font-permanent-marker text-neutral-300 mt-2 text-xl tracking-wide">Generate professional ads in seconds.</p>
-                </div>
 
-                {appState === 'idle' && (
-                     <div className="relative flex flex-col items-center justify-center w-full">
-                        {/* Ghost polaroids for intro animation */}
-                        {GHOST_POLAROIDS_CONFIG.map((config, index) => (
-                             <motion.div
-                                key={index}
-                                className="absolute w-80 h-[26rem] rounded-md p-4 bg-neutral-100/10 blur-sm"
-                                initial={config.initial}
-                                animate={{
-                                    x: "0%", y: "0%", rotate: (Math.random() - 0.5) * 20,
-                                    scale: 0,
-                                    opacity: 0,
-                                }}
-                                transition={{
-                                    ...config.transition,
-                                    ease: "circOut",
-                                    duration: 2,
-                                }}
-                            />
-                        ))}
+            <div className="z-10 flex flex-col items-center justify-center w-full h-full flex-1">
+                <AnimatePresence mode="wait">
+                    {view === 'form' ? (
                         <motion.div
-                             initial={{ opacity: 0, scale: 0.8 }}
-                             animate={{ opacity: 1, scale: 1 }}
-                             transition={{ delay: 2, duration: 0.8, type: 'spring' }}
-                             className="flex flex-col items-center"
+                            key="form"
+                            exit={{ opacity: 0, y: -20 }}
+                            transition={{ duration: 0.3 }}
+                            className="w-full flex flex-col items-center"
                         >
-                            <label htmlFor="file-upload" className="cursor-pointer group transform hover:scale-105 transition-transform duration-300">
-                                 <PolaroidCard 
-                                     caption="Click to begin"
-                                     status="done"
-                                 />
-                            </label>
-                            <input id="file-upload" type="file" className="hidden" accept="image/png, image/jpeg, image/webp" onChange={handleImageUpload} />
-                            <p className="mt-8 font-permanent-marker text-neutral-500 text-center max-w-xs text-lg">
-                                Click the polaroid to upload a photo and create your ad campaign.
-                            </p>
+                            <div className="text-center mb-10">
+                                <h1 className="text-6xl md:text-8xl font-caveat font-bold text-neutral-100">AdMagic</h1>
+                                <p className="font-permanent-marker text-neutral-300 mt-2 text-xl tracking-wide">Generate professional ad campaigns in seconds.</p>
+                            </div>
+                            <FormView onGenerate={handleGenerate} />
                         </motion.div>
-                    </div>
-                )}
-
-                {appState === 'image-uploaded' && uploadedImage && (
-                    <div className="flex flex-col items-center gap-6">
-                         <PolaroidCard 
-                            imageUrl={uploadedImage} 
-                            caption="Your Photo" 
-                            status="done"
-                         />
-                         <div className="flex items-center gap-4 mt-4">
-                            <button onClick={handleReset} className={secondaryButtonClasses}>
-                                Different Photo
-                            </button>
-                            <button onClick={handleGenerateClick} className={primaryButtonClasses}>
-                                Generate
-                            </button>
-                         </div>
-                    </div>
-                )}
-
-                {(appState === 'generating' || appState === 'results-shown') && (
-                     <>
-                        {isMobile ? (
-                            <div className="w-full max-w-sm flex-1 overflow-y-auto mt-4 space-y-8 p-4">
-                                {AD_STYLES.map((style) => (
-                                    <div key={style} className="flex justify-center">
-                                         <PolaroidCard
-                                            caption={style}
-                                            status={generatedImages[style]?.status || 'pending'}
-                                            imageUrl={generatedImages[style]?.url}
-                                            error={generatedImages[style]?.error}
-                                            onShake={handleRegenerateStyle}
-                                            onDownload={handleDownloadIndividualImage}
-                                            isMobile={isMobile}
-                                        />
-                                    </div>
-                                ))}
-                            </div>
-                        ) : (
-                            <div ref={dragAreaRef} className="relative w-full max-w-5xl h-[600px] mt-4">
-                                {AD_STYLES.map((style, index) => {
-                                    const { top, left, rotate } = POSITIONS[index];
-                                    return (
-                                        <motion.div
-                                            key={style}
-                                            className="absolute cursor-grab active:cursor-grabbing"
-                                            style={{ top, left }}
-                                            initial={{ opacity: 0, scale: 0.5, y: 100, rotate: 0 }}
-                                            animate={{ 
-                                                opacity: 1, 
-                                                scale: 1, 
-                                                y: 0,
-                                                rotate: `${rotate}deg`,
-                                            }}
-                                            transition={{ type: 'spring', stiffness: 100, damping: 20, delay: index * 0.15 }}
-                                        >
-                                            <PolaroidCard 
-                                                dragConstraintsRef={dragAreaRef}
-                                                caption={style}
-                                                status={generatedImages[style]?.status || 'pending'}
-                                                imageUrl={generatedImages[style]?.url}
-                                                error={generatedImages[style]?.error}
-                                                onShake={handleRegenerateStyle}
-                                                onDownload={handleDownloadIndividualImage}
-                                                isMobile={isMobile}
-                                            />
-                                        </motion.div>
-                                    );
-                                })}
-                            </div>
-                        )}
-                         <div className="h-20 mt-4 flex items-center justify-center">
-                            {appState === 'results-shown' && (
-                                <div className="flex flex-col sm:flex-row items-center gap-4">
-                                    <button 
-                                        onClick={handleDownloadAlbum} 
-                                        disabled={isDownloading} 
-                                        className={`${primaryButtonClasses} disabled:opacity-50 disabled:cursor-not-allowed`}
-                                    >
-                                        {isDownloading ? 'Creating Campaign...' : 'Download Campaign'}
-                                    </button>
-                                    <button onClick={handleReset} className={secondaryButtonClasses}>
-                                        Start Over
-                                    </button>
-                                </div>
-                            )}
-                        </div>
-                    </>
-                )}
+                    ) : (
+                        <motion.div
+                            key="results"
+                            initial={{ opacity: 0, y: 20 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.5 }}
+                             className="w-full flex flex-col items-center"
+                        >
+                           <ResultsView ads={generatedAds} onStartOver={handleStartOver} />
+                        </motion.div>
+                    )}
+                </AnimatePresence>
             </div>
             <Footer />
         </main>

@@ -1,5 +1,5 @@
 {
-  "name": "Copy of AdMagic",
-  "description": "Upload a photo and instantly generate professional-looking ads in various styles. AdMagic uses AI to transform your image into stunning ad visuals.",
+  "name": "AdMagic",
+  "description": "Provide product details, an image, and a logo to generate a polished, professional advertisement ready for your campaign.",
   "requestFramePermissions": []
 }
